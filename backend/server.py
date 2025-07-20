@@ -87,6 +87,7 @@ class ExcelUploadResponse(BaseModel):
     books_processed: int
     errors: List[dict] = []
     duplicates_found: int = 0
+    auto_enhanced: int = 0
 
 class BookFilter(BaseModel):
     search: Optional[str] = None
@@ -105,6 +106,18 @@ class BookEnhancementResponse(BaseModel):
 class BatchEnhancementRequest(BaseModel):
     book_ids: Optional[List[str]] = None
     enhance_all_pending: bool = False
+
+class BatchShelfAssignmentRequest(BaseModel):
+    barcode: str
+    shelf: str
+
+class BatchShelfAssignmentResponse(BaseModel):
+    success: bool
+    message: str
+    book_title: Optional[str] = None
+    book_author: Optional[str] = None
+    shelf_assigned: str
+    auto_enhanced: bool = False
 
 
 # Google Books API Integration
@@ -490,10 +503,13 @@ async def check_duplicates(book_data):
 # API Routes
 @api_router.get("/")
 async def root():
-    return {"message": "Library Management System API with Google Books Integration"}
+    return {"message": "Library Management System API with Google Books Integration and Barcode Scanning"}
 
 @api_router.post("/books/upload", response_model=ExcelUploadResponse)
-async def upload_excel_file(file: UploadFile = File(...)):
+async def upload_excel_file(
+    file: UploadFile = File(...),
+    auto_enhance: bool = Query(False, description="Automatically enhance books after upload")
+):
     """Upload and process Excel file with book data"""
     
     if not file.filename.lower().endswith(('.xlsx', '.xls')):
@@ -522,6 +538,7 @@ async def upload_excel_file(file: UploadFile = File(...)):
         processed_books = 0
         errors = []
         duplicates_found = 0
+        auto_enhanced_count = 0
         
         for index, row in df.iterrows():
             try:
@@ -550,6 +567,16 @@ async def upload_excel_file(file: UploadFile = File(...)):
                 book_data['search_status'] = 'pending'
                 book = Book(**book_data)
                 
+                # Auto-enhance if requested
+                if auto_enhance:
+                    book.search_status = 'searching'
+                    enhanced_book = await enhance_book_with_google_books(book)
+                    if enhanced_book.search_status == 'found':
+                        auto_enhanced_count += 1
+                    book = enhanced_book
+                    # Small delay to respect API limits
+                    await asyncio.sleep(0.5)
+                
                 # Insert into database
                 await db.books.insert_one(book.dict())
                 processed_books += 1
@@ -562,16 +589,109 @@ async def upload_excel_file(file: UploadFile = File(...)):
         
         return ExcelUploadResponse(
             success=True,
-            message=f"Successfully processed {processed_books} books",
+            message=f"Successfully processed {processed_books} books" + (f", auto-enhanced {auto_enhanced_count}" if auto_enhance else ""),
             books_processed=processed_books,
             errors=errors,
-            duplicates_found=duplicates_found
+            duplicates_found=duplicates_found,
+            auto_enhanced=auto_enhanced_count
         )
         
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+@api_router.post("/books/scan-assign-shelf", response_model=BatchShelfAssignmentResponse)
+async def scan_assign_shelf(request: BatchShelfAssignmentRequest):
+    """Scan barcode and assign shelf in one operation"""
+    try:
+        # Find book by barcode
+        book_data = await db.books.find_one({"barcode": request.barcode})
+        
+        if not book_data:
+            raise HTTPException(status_code=404, detail="Book with this barcode not found")
+        
+        book = Book(**book_data)
+        
+        # Assign shelf
+        book.shelf = request.shelf
+        book.updated_at = datetime.utcnow()
+        
+        # Auto-enhance if book is still pending
+        auto_enhanced = False
+        if book.search_status == 'pending':
+            book.search_status = 'searching'
+            enhanced_book = await enhance_book_with_google_books(book)
+            if enhanced_book.search_status == 'found':
+                auto_enhanced = True
+            book = enhanced_book
+        
+        # Update in database
+        await db.books.update_one(
+            {"id": book.id}, 
+            {"$set": book.dict()}
+        )
+        
+        return BatchShelfAssignmentResponse(
+            success=True,
+            message="Shelf assigned successfully",
+            book_title=book.title,
+            book_author=book.author,
+            shelf_assigned=request.shelf,
+            auto_enhanced=auto_enhanced
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error assigning shelf: {str(e)}")
+
+@api_router.get("/books/shelves")
+async def get_available_shelves():
+    """Get all available shelf numbers (1-120)"""
+    shelves = [{"value": str(i), "label": f"Shelf {i}"} for i in range(1, 121)]
+    
+    # Get shelf usage statistics
+    shelf_stats = {}
+    for i in range(1, 121):
+        count = await db.books.count_documents({"shelf": str(i)})
+        shelf_stats[str(i)] = count
+    
+    return {
+        "shelves": shelves,
+        "usage": shelf_stats,
+        "total_shelves": 120
+    }
+
+@api_router.post("/books/batch-shelf-assignment")
+async def batch_assign_shelves(book_ids: List[str], shelf: str):
+    """Assign shelf to multiple books"""
+    try:
+        if not shelf or not shelf.strip():
+            raise HTTPException(status_code=400, detail="Shelf number is required")
+        
+        shelf_num = int(shelf)
+        if shelf_num < 1 or shelf_num > 120:
+            raise HTTPException(status_code=400, detail="Shelf number must be between 1 and 120")
+        
+        # Update all specified books
+        result = await db.books.update_many(
+            {"id": {"$in": book_ids}},
+            {"$set": {"shelf": shelf, "updated_at": datetime.utcnow()}}
+        )
+        
+        return {
+            "success": True,
+            "message": f"Assigned shelf {shelf} to {result.modified_count} books",
+            "updated_count": result.modified_count
+        }
+        
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid shelf number")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error in batch assignment: {str(e)}")
 
 @api_router.post("/books/{book_id}/enhance", response_model=BookEnhancementResponse)
 async def enhance_single_book(book_id: str):
@@ -716,6 +836,7 @@ async def get_books(
     shelf: Optional[str] = Query(None, description="Filter by shelf"),
     author: Optional[str] = Query(None, description="Filter by author"),
     search_status: Optional[str] = Query(None, description="Filter by search status"),
+    barcode: Optional[str] = Query(None, description="Search by barcode"),
     limit: int = Query(100, le=500, description="Maximum number of books to return"),
     skip: int = Query(0, ge=0, description="Number of books to skip")
 ):
@@ -745,6 +866,9 @@ async def get_books(
     if search_status:
         filter_query["search_status"] = search_status
     
+    if barcode:
+        filter_query["barcode"] = {"$regex": barcode, "$options": "i"}
+    
     # Query database
     cursor = db.books.find(filter_query).skip(skip).limit(limit).sort("title", 1)
     books = await cursor.to_list(length=limit)
@@ -772,13 +896,21 @@ async def get_book_stats():
     not_found_count = await db.books.count_documents({"search_status": "not_found"})
     searching_count = await db.books.count_documents({"search_status": "searching"})
     
+    # Get shelf distribution
+    shelf_distribution = {}
+    for shelf in range(1, 121):
+        count = await db.books.count_documents({"shelf": str(shelf)})
+        if count > 0:
+            shelf_distribution[str(shelf)] = count
+    
     return {
         "total_books": total_books,
         "total_genres": len(genres),
-        "total_shelves": len(shelves),
+        "total_shelves": len([s for s in shelves if s]),
         "total_authors": len(authors),
         "genres": sorted(genres),
-        "shelves": sorted(shelves),
+        "shelves": sorted([int(s) for s in shelves if s.isdigit()]),
+        "shelf_distribution": shelf_distribution,
         "search_status": {
             "pending": pending_count,
             "found": found_count,
@@ -868,7 +1000,7 @@ async def export_books_to_excel(
         filter_query["search_status"] = search_status
     
     # Get all matching books
-    books = await db.books.find(filter_query).sort("title", 1).to_list(None)
+    books = await db.books.find(filter_query).sort("shelf", 1).to_list(None)
     
     if not books:
         raise HTTPException(status_code=404, detail="No books found to export")

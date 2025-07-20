@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import "./App.css";
 import axios from "axios";
 
@@ -16,11 +16,36 @@ function App() {
   const [selectedSearchStatus, setSelectedSearchStatus] = useState("");
   const [uploadStatus, setUploadStatus] = useState(null);
   const [isDragOver, setIsDragOver] = useState(false);
-  const [currentView, setCurrentView] = useState("upload"); // upload, catalog
+  const [currentView, setCurrentView] = useState("upload"); // upload, catalog, scanner
   const [currentBook, setCurrentBook] = useState(null);
   const [isViewerOpen, setIsViewerOpen] = useState(false);
   const [enhancementStatus, setEnhancementStatus] = useState(null);
   const [batchProgress, setBatchProgress] = useState(null);
+  
+  // Scanner mode state
+  const [scannerMode, setScannerMode] = useState(false);
+  const [selectedShelfForScanner, setSelectedShelfForScanner] = useState("");
+  const [barcodeInput, setBarcodeInput] = useState("");
+  const [scanHistory, setScanHistory] = useState([]);
+  const [scanStats, setScanStats] = useState({ success: 0, error: 0 });
+  const [autoEnhanceOnUpload, setAutoEnhanceOnUpload] = useState(false);
+  const [selectedBooks, setSelectedBooks] = useState([]);
+  const [bulkShelf, setBulkShelf] = useState("");
+  
+  const barcodeInputRef = useRef(null);
+
+  // Sound for scan feedback
+  const playSuccessSound = () => {
+    const audio = new Audio('data:audio/wav;base64,UklGRnoGAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQoGAACBhYqFbF1fdJivrJBhNjVgodDbq2EcBj+a2/LDciUFLIHO8tiJNwgZaLvt559NEAxQp+PwtmMcBjiR1/LMeSwFJHfH8N2QQAoUXrTp66hVFApGn+DyvmMeBC+D0O/Vfj0KIXbQ6t2CNA0YZrrt6yEREAg=');
+    audio.volume = 0.3;
+    audio.play().catch(() => {});
+  };
+
+  const playErrorSound = () => {
+    const audio = new Audio('data:audio/wav;base64,UklGRhIEAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YeoDAACGhYqFbF1fdJivrJBhNjVgodDbq2EcBj+a2/LDciUFLIHO8tiJNwgZaLvt559NEAxQp+PwtmMcBjiR1/LMeSwFJHfH8N2QQAoUXrTp66hVFApGn+DyvmMeBC+D0O/Vfj0KIXbQ6t2CNA0YZrrt6yEREAg=');
+    audio.volume = 0.5;
+    audio.play().catch(() => {});
+  };
 
   // Fetch books with filters
   const fetchBooks = useCallback(async () => {
@@ -61,6 +86,13 @@ function App() {
     }
   }, [currentView, fetchBooks]);
 
+  // Focus barcode input when scanner mode is activated
+  useEffect(() => {
+    if (scannerMode && barcodeInputRef.current) {
+      barcodeInputRef.current.focus();
+    }
+  }, [scannerMode, selectedShelfForScanner]);
+
   // File upload handlers
   const handleFileUpload = async (file) => {
     if (!file) return;
@@ -79,8 +111,12 @@ function App() {
     const formData = new FormData();
     formData.append('file', file);
     
+    const url = autoEnhanceOnUpload 
+      ? `${API}/books/upload?auto_enhance=true`
+      : `${API}/books/upload`;
+    
     try {
-      const response = await axios.post(`${API}/books/upload`, formData, {
+      const response = await axios.post(url, formData, {
         headers: {
           'Content-Type': 'multipart/form-data',
         },
@@ -104,6 +140,133 @@ function App() {
       });
     } finally {
       setLoading(false);
+    }
+  };
+
+  // Barcode scanning functions
+  const handleBarcodeScanning = async (barcode) => {
+    if (!selectedShelfForScanner || !barcode.trim()) {
+      return;
+    }
+
+    try {
+      const response = await axios.post(`${API}/books/scan-assign-shelf`, {
+        barcode: barcode.trim(),
+        shelf: selectedShelfForScanner
+      });
+
+      if (response.data.success) {
+        playSuccessSound();
+        setScanHistory(prev => [{
+          id: Date.now(),
+          barcode: barcode.trim(),
+          title: response.data.book_title,
+          author: response.data.book_author,
+          shelf: response.data.shelf_assigned,
+          auto_enhanced: response.data.auto_enhanced,
+          timestamp: new Date(),
+          success: true
+        }, ...prev.slice(0, 49)]); // Keep only last 50 scans
+
+        setScanStats(prev => ({ ...prev, success: prev.success + 1 }));
+        
+        // Show brief success message
+        setEnhancementStatus({
+          type: 'success',
+          message: `✅ ${response.data.book_title} → Shelf ${response.data.shelf_assigned}` + 
+                   (response.data.auto_enhanced ? ' (Enhanced!)' : '')
+        });
+        
+        setTimeout(() => setEnhancementStatus(null), 3000);
+
+      } else {
+        throw new Error('Assignment failed');
+      }
+
+    } catch (error) {
+      playErrorSound();
+      setScanHistory(prev => [{
+        id: Date.now(),
+        barcode: barcode.trim(),
+        title: 'Unknown Book',
+        author: '',
+        shelf: selectedShelfForScanner,
+        timestamp: new Date(),
+        success: false,
+        error: error.response?.data?.detail || 'Book not found'
+      }, ...prev.slice(0, 49)]);
+
+      setScanStats(prev => ({ ...prev, error: prev.error + 1 }));
+      
+      setEnhancementStatus({
+        type: 'error',
+        message: `❌ Barcode ${barcode.trim()}: ${error.response?.data?.detail || 'Book not found'}`
+      });
+      
+      setTimeout(() => setEnhancementStatus(null), 5000);
+    }
+  };
+
+  const handleBarcodeSubmit = (e) => {
+    e.preventDefault();
+    if (barcodeInput.trim()) {
+      handleBarcodeScanning(barcodeInput);
+      setBarcodeInput('');
+      
+      // Refocus input for continuous scanning
+      setTimeout(() => {
+        if (barcodeInputRef.current) {
+          barcodeInputRef.current.focus();
+        }
+      }, 100);
+    }
+  };
+
+  const startScannerMode = () => {
+    if (!selectedShelfForScanner) {
+      alert('Please select a shelf first');
+      return;
+    }
+    setScannerMode(true);
+    setScanHistory([]);
+    setScanStats({ success: 0, error: 0 });
+  };
+
+  const stopScannerMode = () => {
+    setScannerMode(false);
+    setBarcodeInput('');
+    fetchBooks(); // Refresh books after scanning session
+    fetchStats(); // Refresh stats
+  };
+
+  // Bulk shelf assignment
+  const handleBulkShelfAssignment = async () => {
+    if (selectedBooks.length === 0) {
+      alert('Please select books first');
+      return;
+    }
+    
+    if (!bulkShelf) {
+      alert('Please select a shelf');
+      return;
+    }
+
+    try {
+      const response = await axios.post(`${API}/books/batch-shelf-assignment`, selectedBooks, {
+        params: { shelf: bulkShelf }
+      });
+
+      if (response.data.success) {
+        alert(`Successfully assigned shelf ${bulkShelf} to ${response.data.updated_count} books`);
+        setSelectedBooks([]);
+        setBulkShelf('');
+        fetchBooks();
+        fetchStats();
+      }
+
+    } catch (error) {
+      console.error("Bulk assignment error:", error);
+      alert(error.response?.data?.detail || "Bulk assignment failed");
     }
   };
 
@@ -307,6 +470,9 @@ function App() {
     return genreMap[genre] || genre || '—';
   };
 
+  // Generate shelf options (1-120)
+  const shelfOptions = Array.from({ length: 120 }, (_, i) => i + 1);
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-indigo-50">
       {/* Header */}
@@ -346,6 +512,16 @@ function App() {
               >
                 📖 Book Catalog
               </button>
+              <button
+                onClick={() => setCurrentView('scanner')}
+                className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+                  currentView === 'scanner'
+                    ? 'bg-green-100 text-green-700'
+                    : 'text-gray-500 hover:text-gray-700 hover:bg-gray-100'
+                }`}
+              >
+                📱 Barcode Scanner
+              </button>
             </nav>
           </div>
         </div>
@@ -368,8 +544,8 @@ function App() {
               <div className="text-sm text-gray-500">Genres</div>
             </div>
             <div className="text-center">
-              <div className="text-2xl font-bold text-orange-600">{stats.total_shelves || 0}</div>
-              <div className="text-sm text-gray-500">Shelves</div>
+              <div className="text-2xl font-bold text-orange-600">{stats.total_shelves || 0}/120</div>
+              <div className="text-sm text-gray-500">Shelves Used</div>
             </div>
             <div className="text-center">
               <div className="text-2xl font-bold text-green-500">{stats.search_status?.found || 0}</div>
@@ -435,6 +611,24 @@ function App() {
                 </p>
               </div>
 
+              {/* Auto-enhance option */}
+              <div className="mb-6 p-4 bg-green-50 rounded-lg border border-green-200">
+                <label className="flex items-center space-x-3 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={autoEnhanceOnUpload}
+                    onChange={(e) => setAutoEnhanceOnUpload(e.target.checked)}
+                    className="w-4 h-4 text-green-600 bg-gray-100 border-gray-300 rounded focus:ring-green-500"
+                  />
+                  <div>
+                    <div className="font-medium text-green-800">🚀 Auto-enhance during upload</div>
+                    <div className="text-sm text-green-600">
+                      Automatically search Google Books and enhance each book during upload (slower but complete)
+                    </div>
+                  </div>
+                </label>
+              </div>
+
               {/* Drag and Drop Area */}
               <div
                 className={`border-2 border-dashed rounded-xl p-12 text-center transition-all duration-300 ${
@@ -471,7 +665,9 @@ function App() {
                   {loading && (
                     <div className="flex items-center justify-center space-x-2">
                       <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-600"></div>
-                      <span className="text-blue-600">Processing file...</span>
+                      <span className="text-blue-600">
+                        {autoEnhanceOnUpload ? 'Processing and enhancing...' : 'Processing file...'}
+                      </span>
                     </div>
                   )}
                 </div>
@@ -493,8 +689,12 @@ function App() {
                       {uploadStatus.books_processed > 0 && (
                         <p className="text-sm mt-1">
                           Successfully imported {uploadStatus.books_processed} books.
-                          <br />
-                          📍 Books are ready for Google Books enhancement in the catalog view.
+                          {uploadStatus.auto_enhanced > 0 && (
+                            <span className="text-green-600 font-medium">
+                              <br />🚀 Auto-enhanced {uploadStatus.auto_enhanced} books with Google Books data!
+                            </span>
+                          )}
+                          <br />📍 Books are ready for Google Books enhancement in the catalog view.
                         </p>
                       )}
                       {uploadStatus.duplicates_found > 0 && (
@@ -536,6 +736,142 @@ function App() {
           </div>
         )}
 
+        {/* Scanner View */}
+        {currentView === 'scanner' && (
+          <div className="space-y-8">
+            <div className="bg-white rounded-xl shadow-lg p-8">
+              <div className="text-center mb-8">
+                <h2 className="text-3xl font-bold text-gray-900 mb-4">📱 Barcode Scanner & Shelf Assignment</h2>
+                <p className="text-lg text-gray-600">
+                  Select a shelf number, then scan barcodes to assign books instantly. Books will be automatically enhanced with Google Books data.
+                </p>
+              </div>
+
+              {/* Scanner Setup */}
+              {!scannerMode ? (
+                <div className="max-w-md mx-auto space-y-6">
+                  <div>
+                    <label className="block text-lg font-medium text-gray-700 mb-3">Select Shelf (1-120)</label>
+                    <select
+                      value={selectedShelfForScanner}
+                      onChange={(e) => setSelectedShelfForScanner(e.target.value)}
+                      className="w-full p-4 text-lg border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    >
+                      <option value="">Choose Shelf...</option>
+                      {shelfOptions.map(shelf => (
+                        <option key={shelf} value={shelf}>
+                          Shelf {shelf} ({stats.shelf_distribution?.[shelf] || 0} books)
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <button
+                    onClick={startScannerMode}
+                    disabled={!selectedShelfForScanner}
+                    className="w-full py-4 px-6 bg-green-600 text-white text-lg font-semibold rounded-lg hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                  >
+                    🚀 Start Scanning Mode
+                  </button>
+                </div>
+              ) : (
+                /* Scanner Active Mode */
+                <div className="space-y-6">
+                  {/* Scanner Header */}
+                  <div className="bg-green-50 border border-green-200 rounded-lg p-6">
+                    <div className="flex justify-between items-center mb-4">
+                      <div>
+                        <h3 className="text-xl font-bold text-green-800">📱 Scanner Active</h3>
+                        <p className="text-green-600">Assigning to Shelf {selectedShelfForScanner}</p>
+                      </div>
+                      <button
+                        onClick={stopScannerMode}
+                        className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors"
+                      >
+                        ⏹️ Stop Scanning
+                      </button>
+                    </div>
+
+                    {/* Scan Stats */}
+                    <div className="grid grid-cols-2 gap-4">
+                      <div className="text-center p-4 bg-white rounded-lg">
+                        <div className="text-2xl font-bold text-green-600">{scanStats.success}</div>
+                        <div className="text-sm text-gray-600">Successful</div>
+                      </div>
+                      <div className="text-center p-4 bg-white rounded-lg">
+                        <div className="text-2xl font-bold text-red-600">{scanStats.error}</div>
+                        <div className="text-sm text-gray-600">Errors</div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Barcode Input */}
+                  <div className="bg-blue-50 border border-blue-200 rounded-lg p-6">
+                    <form onSubmit={handleBarcodeSubmit} className="space-y-4">
+                      <label className="block text-lg font-medium text-blue-800 mb-3">
+                        📋 Scan or Enter Barcode
+                      </label>
+                      <input
+                        ref={barcodeInputRef}
+                        type="text"
+                        value={barcodeInput}
+                        onChange={(e) => setBarcodeInput(e.target.value)}
+                        placeholder="Scan barcode here..."
+                        className="w-full p-4 text-lg border border-blue-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                        autoFocus
+                      />
+                      <button
+                        type="submit"
+                        disabled={!barcodeInput.trim()}
+                        className="w-full py-3 px-6 bg-blue-600 text-white text-lg font-semibold rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                      >
+                        ✅ Assign to Shelf {selectedShelfForScanner}
+                      </button>
+                    </form>
+                  </div>
+
+                  {/* Scan History */}
+                  {scanHistory.length > 0 && (
+                    <div className="bg-gray-50 rounded-lg p-6">
+                      <h4 className="text-lg font-bold text-gray-800 mb-4">📋 Recent Scans</h4>
+                      <div className="space-y-2 max-h-96 overflow-y-auto">
+                        {scanHistory.slice(0, 10).map((scan) => (
+                          <div
+                            key={scan.id}
+                            className={`p-3 rounded-lg border ${
+                              scan.success
+                                ? 'bg-green-50 border-green-200 text-green-800'
+                                : 'bg-red-50 border-red-200 text-red-800'
+                            }`}
+                          >
+                            <div className="flex justify-between items-start">
+                              <div>
+                                <div className="font-medium">
+                                  {scan.success ? '✅' : '❌'} {scan.title}
+                                  {scan.auto_enhanced && ' 🚀'}
+                                </div>
+                                <div className="text-sm opacity-75">
+                                  {scan.author} • Barcode: {scan.barcode} • Shelf: {scan.shelf}
+                                </div>
+                                {scan.error && (
+                                  <div className="text-sm font-medium">Error: {scan.error}</div>
+                                )}
+                              </div>
+                              <div className="text-xs opacity-60">
+                                {scan.timestamp.toLocaleTimeString()}
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
         {/* Catalog View */}
         {currentView === 'catalog' && (
           <div className="space-y-6">
@@ -564,6 +900,44 @@ function App() {
                 </div>
               </div>
             </div>
+
+            {/* Bulk Actions */}
+            {selectedBooks.length > 0 && (
+              <div className="bg-yellow-50 border border-yellow-200 rounded-xl p-6">
+                <div className="flex justify-between items-center">
+                  <div>
+                    <h3 className="text-lg font-semibold text-yellow-800">
+                      📦 Bulk Actions ({selectedBooks.length} books selected)
+                    </h3>
+                  </div>
+                  <div className="flex gap-3">
+                    <select
+                      value={bulkShelf}
+                      onChange={(e) => setBulkShelf(e.target.value)}
+                      className="px-3 py-2 border border-yellow-300 rounded-lg focus:ring-2 focus:ring-yellow-500"
+                    >
+                      <option value="">Select Shelf...</option>
+                      {shelfOptions.map(shelf => (
+                        <option key={shelf} value={shelf}>Shelf {shelf}</option>
+                      ))}
+                    </select>
+                    <button
+                      onClick={handleBulkShelfAssignment}
+                      disabled={!bulkShelf}
+                      className="px-4 py-2 bg-yellow-600 text-white rounded-lg hover:bg-yellow-700 disabled:opacity-50 transition-colors"
+                    >
+                      Assign Shelf
+                    </button>
+                    <button
+                      onClick={() => setSelectedBooks([])}
+                      className="px-4 py-2 text-gray-600 hover:text-gray-800 rounded-lg transition-colors"
+                    >
+                      Clear Selection
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
 
             {/* Search and Filter Section */}
             <div className="bg-white rounded-xl shadow-lg p-6">
@@ -608,7 +982,7 @@ function App() {
                     onChange={(e) => setSelectedShelf(e.target.value)}
                   >
                     <option value="">All Shelves</option>
-                    {stats.shelves?.map((shelf) => (
+                    {shelfOptions.map(shelf => (
                       <option key={shelf} value={shelf}>Shelf {shelf}</option>
                     ))}
                   </select>
@@ -676,6 +1050,20 @@ function App() {
                   <table className="min-w-full divide-y divide-gray-200">
                     <thead className="bg-gray-50">
                       <tr>
+                        <th className="px-6 py-3 text-left">
+                          <input
+                            type="checkbox"
+                            onChange={(e) => {
+                              if (e.target.checked) {
+                                setSelectedBooks(books.map(book => book.id));
+                              } else {
+                                setSelectedBooks([]);
+                              }
+                            }}
+                            checked={selectedBooks.length === books.length && books.length > 0}
+                            className="w-4 h-4 text-blue-600"
+                          />
+                        </th>
                         <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Title</th>
                         <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Author</th>
                         <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">ISBN</th>
@@ -688,6 +1076,20 @@ function App() {
                     <tbody className="bg-white divide-y divide-gray-200">
                       {books.map((book) => (
                         <tr key={book.id} className="hover:bg-gray-50 transition-colors">
+                          <td className="px-6 py-4">
+                            <input
+                              type="checkbox"
+                              checked={selectedBooks.includes(book.id)}
+                              onChange={(e) => {
+                                if (e.target.checked) {
+                                  setSelectedBooks([...selectedBooks, book.id]);
+                                } else {
+                                  setSelectedBooks(selectedBooks.filter(id => id !== book.id));
+                                }
+                              }}
+                              className="w-4 h-4 text-blue-600"
+                            />
+                          </td>
                           <td className="px-6 py-4">
                             <div 
                               className="text-sm font-medium text-blue-600 hover:text-blue-800 cursor-pointer"
@@ -713,7 +1115,7 @@ function App() {
                             </span>
                           </td>
                           <td className="px-6 py-4 whitespace-nowrap">
-                            <div className="text-sm text-gray-900">{book.shelf || '—'}</div>
+                            <div className="text-sm text-gray-900">{book.shelf ? `Shelf ${book.shelf}` : '—'}</div>
                           </td>
                           <td className="px-6 py-4 whitespace-nowrap">
                             <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${getStatusBadgeClass(book.search_status)}`}>
@@ -819,7 +1221,7 @@ function App() {
                     </div>
                     <div>
                       <label className="block text-sm font-medium text-gray-700">Shelf</label>
-                      <p className="mt-1 text-sm text-gray-900">{currentBook.shelf || '—'}</p>
+                      <p className="mt-1 text-sm text-gray-900">{currentBook.shelf ? `Shelf ${currentBook.shelf}` : '—'}</p>
                     </div>
                     <div>
                       <label className="block text-sm font-medium text-gray-700">AR Level</label>
