@@ -185,15 +185,18 @@ backend:
 
   - task: "Google Books API Integration - Single Book Enhancement"
     implemented: true
-    working: true
+    working: false
     file: "/app/backend/server.py"
-    stuck_count: 0
+    stuck_count: 1
     priority: "high"
     needs_retesting: false
     status_history:
         - working: true
           agent: "testing"
           comment: "CRITICAL FEATURE TESTED: ✅ POST /api/books/{id}/enhance endpoint working correctly ✅ Google Books API integration functional (with rate limiting handled) ✅ Enhancement logic correctly updates search_status ✅ Returns appropriate response when no enhancement data found ✅ Database operations working correctly"
+        - working: false
+          agent: "testing"
+          comment: "🚨 CRITICAL ISSUE DISCOVERED: Google Books API integration is COMPLETELY NON-FUNCTIONAL. Testing with famous books (Harry Potter, Great Gatsby) revealed: ❌ HTTP 403 'Cannot determine user location for geographically restricted operation' ❌ HTTP 429 'Quota exceeded' (100 queries/minute limit) ❌ All enhancement attempts return 'No additional information found' ❌ Books status changes from 'pending' to 'not_found' ❌ No descriptions, images, AR levels, or Lexile scores being retrieved. The API endpoints work but Google Books API is blocked by geographic restrictions and rate limits."
 
   - task: "Google Books API Integration - Batch Enhancement"
     implemented: true
