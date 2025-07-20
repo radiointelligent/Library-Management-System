@@ -215,15 +215,18 @@ backend:
 
   - task: "Excel Upload with Auto-Enhancement"
     implemented: true
-    working: true
+    working: false
     file: "/app/backend/server.py"
-    stuck_count: 0
+    stuck_count: 1
     priority: "high"
     needs_retesting: false
     status_history:
         - working: true
           agent: "testing"
           comment: "CRITICAL FEATURE TESTED: ✅ POST /api/books/upload?auto_enhance=true parameter working ✅ Books uploaded with correct search_status ✅ Auto-enhancement process initiated during upload ✅ Database operations successful ✅ Enhanced data properly stored and retrievable"
+        - working: false
+          agent: "testing"
+          comment: "🚨 CRITICAL ISSUE DISCOVERED: Excel upload with auto_enhance=true is NON-FUNCTIONAL. Testing with real books (Lord of the Rings, Animal Farm, Brave New World) showed: ✅ Upload successful (1 book processed) ❌ Auto-enhancement failed (0 books enhanced) ❌ All books end up with 'not_found' status ❌ No descriptions, images, or additional data retrieved. The upload works but enhancement fails due to Google Books API restrictions."
 
   - task: "Barcode Scanning with Shelf Assignment"
     implemented: true
