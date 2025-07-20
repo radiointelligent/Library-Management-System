@@ -7,7 +7,7 @@ import os
 import logging
 from pathlib import Path
 from pydantic import BaseModel, Field, validator
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 import uuid
 from datetime import datetime
 import pandas as pd
@@ -15,6 +15,8 @@ import io
 import json
 import xlsxwriter
 from urllib.parse import unquote
+import httpx
+import asyncio
 
 
 ROOT_DIR = Path(__file__).parent
@@ -41,6 +43,15 @@ class Book(BaseModel):
     barcode: Optional[str] = None
     shelf: Optional[str] = None
     genre: Optional[str] = None
+    ar_level: Optional[str] = None
+    lexile: Optional[str] = None
+    image_url: Optional[str] = None
+    description: Optional[str] = None
+    description_ru: Optional[str] = None
+    page_count: Optional[int] = None
+    categories: Optional[List[str]] = None
+    maturity_rating: Optional[str] = None
+    search_status: str = "pending"  # pending, found, not_found, searching
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)
 
@@ -57,6 +68,8 @@ class BookCreate(BaseModel):
     barcode: Optional[str] = None
     shelf: Optional[str] = None
     genre: Optional[str] = None
+    ar_level: Optional[str] = None
+    lexile: Optional[str] = None
 
 class BookUpdate(BaseModel):
     title: Optional[str] = None
@@ -65,6 +78,8 @@ class BookUpdate(BaseModel):
     barcode: Optional[str] = None
     shelf: Optional[str] = None
     genre: Optional[str] = None
+    ar_level: Optional[str] = None
+    lexile: Optional[str] = None
 
 class ExcelUploadResponse(BaseModel):
     success: bool
@@ -78,6 +93,335 @@ class BookFilter(BaseModel):
     genre: Optional[str] = None
     shelf: Optional[str] = None
     author: Optional[str] = None
+
+class BookEnhancementRequest(BaseModel):
+    book_id: str
+
+class BookEnhancementResponse(BaseModel):
+    success: bool
+    message: str
+    enhanced_fields: List[str] = []
+
+class BatchEnhancementRequest(BaseModel):
+    book_ids: Optional[List[str]] = None
+    enhance_all_pending: bool = False
+
+
+# Google Books API Integration
+async def search_google_books(title: str, author: str = None, max_results: int = 5) -> List[Dict]:
+    """Search Google Books API for book information"""
+    try:
+        search_terms = [title]
+        if author and author.strip() and author != "Неизвестен":
+            search_terms.append(author)
+        
+        query = " ".join(search_terms)
+        url = f"https://www.googleapis.com/books/v1/volumes"
+        params = {
+            "q": query,
+            "maxResults": max_results,
+            "fields": "items(id,volumeInfo(title,authors,industryIdentifiers,categories,description,imageLinks,pageCount,maturityRating,language,publishedDate))"
+        }
+        
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(url, params=params)
+            response.raise_for_status()
+            
+        data = response.json()
+        
+        if "items" not in data:
+            return []
+            
+        return data["items"]
+        
+    except Exception as e:
+        logging.error(f"Error searching Google Books API: {str(e)}")
+        return []
+
+def calculate_similarity(str1: str, str2: str) -> float:
+    """Calculate similarity between two strings"""
+    if not str1 or not str2:
+        return 0.0
+    
+    str1_lower = str1.lower()
+    str2_lower = str2.lower()
+    
+    # Exact match
+    if str1_lower == str2_lower:
+        return 1.0
+    
+    # Contains match
+    if str1_lower in str2_lower or str2_lower in str1_lower:
+        shorter = min(len(str1_lower), len(str2_lower))
+        longer = max(len(str1_lower), len(str2_lower))
+        return min(shorter / longer + 0.3, 1.0)
+    
+    # Word overlap
+    words1 = str1_lower.split()
+    words2 = str2_lower.split()
+    
+    if not words1 or not words2:
+        return 0.0
+    
+    common_words = 0
+    for word in words1:
+        if len(word) > 2 and word in words2:
+            common_words += 1
+    
+    return common_words / max(len(words1), len(words2))
+
+def detect_genre(volume_info: Dict) -> str:
+    """Detect genre from Google Books volume info"""
+    categories = volume_info.get("categories", [])
+    description = (volume_info.get("description", "")).lower()
+    title = (volume_info.get("title", "")).lower()
+    
+    # Check categories first
+    for category in categories:
+        category_lower = category.lower()
+        
+        if "fiction" in category_lower and "non-fiction" not in category_lower:
+            if "romance" in category_lower:
+                return "rom"
+            if "mystery" in category_lower or "thriller" in category_lower:
+                return "mys"
+            if "fantasy" in category_lower or "magic" in category_lower:
+                return "fan"
+            if "adventure" in category_lower:
+                return "adv"
+            return "fic"
+        
+        if "non-fiction" in category_lower or "nonfiction" in category_lower:
+            return "nf"
+        if "biography" in category_lower or "memoir" in category_lower:
+            return "bio"
+        if "science" in category_lower or "technology" in category_lower:
+            return "sci"
+        if "history" in category_lower or "historical" in category_lower:
+            return "his"
+        if "romance" in category_lower:
+            return "rom"
+        if "mystery" in category_lower or "detective" in category_lower:
+            return "mys"
+        if "fantasy" in category_lower or "fairy" in category_lower:
+            return "fan"
+        if "adventure" in category_lower or "action" in category_lower:
+            return "adv"
+    
+    # Check description and title
+    combined_text = f"{description} {title}"
+    
+    if "biography" in combined_text or "memoir" in combined_text or "life of" in combined_text:
+        return "bio"
+    if "mystery" in combined_text or "detective" in combined_text or "murder" in combined_text:
+        return "mys"
+    if "romance" in combined_text or "love story" in combined_text:
+        return "rom"
+    if "fantasy" in combined_text or "magic" in combined_text or "wizard" in combined_text:
+        return "fan"
+    if "adventure" in combined_text or "journey" in combined_text or "quest" in combined_text:
+        return "adv"
+    if "science" in combined_text or "technology" in combined_text or "research" in combined_text:
+        return "sci"
+    if "history" in combined_text or "historical" in combined_text or "ancient" in combined_text:
+        return "his"
+    if "true story" in combined_text or "real" in combined_text or "fact" in combined_text:
+        return "nf"
+    
+    return "fic"
+
+def generate_ar_level(volume_info: Dict) -> str:
+    """Generate AR Level based on book characteristics"""
+    page_count = volume_info.get("pageCount", 0)
+    maturity_rating = (volume_info.get("maturityRating", "")).lower()
+    categories = volume_info.get("categories", [])
+    
+    # Check if it's a children's book
+    is_childrens = any("juvenile" in cat.lower() or "children" in cat.lower() for cat in categories)
+    
+    if is_childrens:
+        if page_count < 50:
+            return "1.0-2.5"
+        elif page_count < 100:
+            return "2.0-3.5"
+        else:
+            return "3.0-5.0"
+    
+    # Adult books
+    if page_count < 100:
+        return "3.0-5.0"
+    elif page_count < 200:
+        return "4.0-6.5"
+    elif page_count < 300:
+        return "5.0-8.0"
+    elif page_count < 500:
+        return "6.0-9.0"
+    else:
+        return "7.0-12.0"
+
+def generate_lexile(volume_info: Dict) -> str:
+    """Generate Lexile level based on book characteristics"""
+    page_count = volume_info.get("pageCount", 0)
+    categories = volume_info.get("categories", [])
+    
+    is_childrens = any("juvenile" in cat.lower() or "children" in cat.lower() for cat in categories)
+    
+    if is_childrens:
+        if page_count < 50:
+            return "200L-400L"
+        elif page_count < 100:
+            return "300L-600L"
+        else:
+            return "500L-800L"
+    
+    # Adult books
+    if page_count < 100:
+        return "400L-700L"
+    elif page_count < 200:
+        return "600L-900L"
+    elif page_count < 300:
+        return "700L-1000L"
+    elif page_count < 500:
+        return "800L-1200L"
+    else:
+        return "900L-1400L"
+
+def find_best_match(google_books_results: List[Dict], target_title: str, target_author: str = None) -> Optional[Dict]:
+    """Find the best matching book from Google Books results"""
+    if not google_books_results:
+        return None
+    
+    best_match = None
+    best_score = 0.0
+    
+    for item in google_books_results:
+        volume_info = item.get("volumeInfo", {})
+        score = 0.0
+        
+        # Title similarity (weighted heavily)
+        book_title = volume_info.get("title", "")
+        if book_title:
+            title_similarity = calculate_similarity(book_title, target_title)
+            score += title_similarity * 3
+        
+        # Author similarity
+        book_authors = volume_info.get("authors", [])
+        if book_authors and target_author and target_author != "Неизвестен":
+            author_similarity = max(
+                calculate_similarity(author, target_author) 
+                for author in book_authors
+            )
+            if author_similarity > 0.7:
+                score += 2
+        
+        # Language preference (English books)
+        language = volume_info.get("language", "")
+        if language == "en":
+            score += 0.5
+        
+        # Has description
+        if volume_info.get("description"):
+            score += 0.3
+        
+        # Has image
+        if volume_info.get("imageLinks"):
+            score += 0.2
+        
+        if score > best_score:
+            best_score = score
+            best_match = item
+    
+    # Only return if score is reasonable
+    return best_match if best_score > 1.0 else None
+
+async def enhance_book_with_google_books(book: Book) -> Book:
+    """Enhance a single book with Google Books data"""
+    try:
+        # Search for the book
+        google_results = await search_google_books(book.title, book.author)
+        
+        if not google_results:
+            book.search_status = "not_found"
+            return book
+        
+        # Find best match
+        best_match = find_best_match(google_results, book.title, book.author)
+        
+        if not best_match:
+            book.search_status = "not_found"
+            return book
+        
+        volume_info = best_match.get("volumeInfo", {})
+        
+        # Update book information only if current fields are empty
+        enhanced_fields = []
+        
+        # Update author if unknown
+        authors = volume_info.get("authors", [])
+        if authors and (not book.author or book.author == "Неизвестен" or book.author.strip() == ""):
+            book.author = authors[0]
+            enhanced_fields.append("author")
+        
+        # Update ISBN
+        if not book.isbn:
+            industry_identifiers = volume_info.get("industryIdentifiers", [])
+            for identifier in industry_identifiers:
+                if "ISBN" in identifier.get("type", ""):
+                    book.isbn = identifier.get("identifier", "")
+                    enhanced_fields.append("isbn")
+                    break
+        
+        # Update description
+        if not book.description:
+            description = volume_info.get("description", "")
+            if description:
+                book.description = description
+                enhanced_fields.append("description")
+        
+        # Update image URL
+        if not book.image_url:
+            image_links = volume_info.get("imageLinks", {})
+            if image_links:
+                book.image_url = (
+                    image_links.get("thumbnail") or 
+                    image_links.get("smallThumbnail") or 
+                    image_links.get("medium") or 
+                    image_links.get("large") or ""
+                )
+                if book.image_url:
+                    enhanced_fields.append("image_url")
+        
+        # Update genre
+        if not book.genre:
+            book.genre = detect_genre(volume_info)
+            enhanced_fields.append("genre")
+        
+        # Update AR level
+        if not book.ar_level:
+            book.ar_level = generate_ar_level(volume_info)
+            enhanced_fields.append("ar_level")
+        
+        # Update Lexile
+        if not book.lexile:
+            book.lexile = generate_lexile(volume_info)
+            enhanced_fields.append("lexile")
+        
+        # Store additional metadata
+        book.page_count = volume_info.get("pageCount")
+        book.categories = volume_info.get("categories", [])
+        book.maturity_rating = volume_info.get("maturityRating")
+        
+        book.search_status = "found"
+        book.updated_at = datetime.utcnow()
+        
+        logging.info(f"Enhanced book '{book.title}' with fields: {enhanced_fields}")
+        
+        return book
+        
+    except Exception as e:
+        logging.error(f"Error enhancing book '{book.title}': {str(e)}")
+        book.search_status = "not_found"
+        return book
 
 
 # Excel Processing Functions
@@ -146,7 +490,7 @@ async def check_duplicates(book_data):
 # API Routes
 @api_router.get("/")
 async def root():
-    return {"message": "Library Management System API"}
+    return {"message": "Library Management System API with Google Books Integration"}
 
 @api_router.post("/books/upload", response_model=ExcelUploadResponse)
 async def upload_excel_file(file: UploadFile = File(...)):
@@ -202,7 +546,8 @@ async def upload_excel_file(file: UploadFile = File(...)):
                     })
                     continue
                 
-                # Create book object
+                # Create book object with search_status = pending
+                book_data['search_status'] = 'pending'
                 book = Book(**book_data)
                 
                 # Insert into database
@@ -228,12 +573,149 @@ async def upload_excel_file(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
+@api_router.post("/books/{book_id}/enhance", response_model=BookEnhancementResponse)
+async def enhance_single_book(book_id: str):
+    """Enhance a single book with Google Books data"""
+    try:
+        # Find the book
+        book_data = await db.books.find_one({"id": book_id})
+        if not book_data:
+            raise HTTPException(status_code=404, detail="Book not found")
+        
+        book = Book(**book_data)
+        
+        # Set status to searching
+        await db.books.update_one(
+            {"id": book_id}, 
+            {"$set": {"search_status": "searching", "updated_at": datetime.utcnow()}}
+        )
+        
+        # Enhance the book
+        enhanced_book = await enhance_book_with_google_books(book)
+        
+        # Update in database
+        await db.books.update_one(
+            {"id": book_id}, 
+            {"$set": enhanced_book.dict()}
+        )
+        
+        enhanced_fields = []
+        original_book = Book(**book_data)
+        
+        # Determine which fields were enhanced
+        if enhanced_book.author != original_book.author:
+            enhanced_fields.append("author")
+        if enhanced_book.isbn != original_book.isbn:
+            enhanced_fields.append("isbn")
+        if enhanced_book.description != original_book.description:
+            enhanced_fields.append("description")
+        if enhanced_book.image_url != original_book.image_url:
+            enhanced_fields.append("image_url")
+        if enhanced_book.genre != original_book.genre:
+            enhanced_fields.append("genre")
+        
+        return BookEnhancementResponse(
+            success=enhanced_book.search_status == "found",
+            message="Book enhanced successfully" if enhanced_book.search_status == "found" else "No additional information found",
+            enhanced_fields=enhanced_fields
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        # Reset status to pending on error
+        await db.books.update_one(
+            {"id": book_id}, 
+            {"$set": {"search_status": "pending", "updated_at": datetime.utcnow()}}
+        )
+        raise HTTPException(status_code=500, detail=f"Error enhancing book: {str(e)}")
+
+@api_router.post("/books/enhance-batch")
+async def enhance_books_batch(request: BatchEnhancementRequest):
+    """Enhance multiple books with Google Books data"""
+    try:
+        # Determine which books to enhance
+        if request.enhance_all_pending:
+            # Enhance all books with pending status
+            books_cursor = db.books.find({"search_status": "pending"})
+            books_data = await books_cursor.to_list(length=None)
+        else:
+            # Enhance specific books
+            if not request.book_ids:
+                raise HTTPException(status_code=400, detail="No books specified for enhancement")
+            
+            books_data = []
+            for book_id in request.book_ids:
+                book_data = await db.books.find_one({"id": book_id})
+                if book_data:
+                    books_data.append(book_data)
+        
+        if not books_data:
+            return {"success": True, "message": "No books to enhance", "enhanced_count": 0, "errors": []}
+        
+        enhanced_count = 0
+        errors = []
+        
+        # Process books with delay to respect API limits
+        for book_data in books_data:
+            try:
+                book = Book(**book_data)
+                
+                # Set status to searching
+                await db.books.update_one(
+                    {"id": book.id}, 
+                    {"$set": {"search_status": "searching", "updated_at": datetime.utcnow()}}
+                )
+                
+                # Enhance the book
+                enhanced_book = await enhance_book_with_google_books(book)
+                
+                # Update in database
+                await db.books.update_one(
+                    {"id": book.id}, 
+                    {"$set": enhanced_book.dict()}
+                )
+                
+                if enhanced_book.search_status == "found":
+                    enhanced_count += 1
+                
+                # Small delay to respect API limits
+                await asyncio.sleep(1.0)
+                
+            except Exception as e:
+                logging.error(f"Error enhancing book {book_data.get('title', 'Unknown')}: {str(e)}")
+                errors.append({
+                    "book_id": book_data.get("id"),
+                    "title": book_data.get("title"),
+                    "error": str(e)
+                })
+                
+                # Reset status to pending on error
+                await db.books.update_one(
+                    {"id": book_data.get("id")}, 
+                    {"$set": {"search_status": "pending", "updated_at": datetime.utcnow()}}
+                )
+        
+        return {
+            "success": True,
+            "message": f"Batch enhancement completed. Enhanced {enhanced_count} of {len(books_data)} books.",
+            "enhanced_count": enhanced_count,
+            "total_processed": len(books_data),
+            "errors": errors
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error in batch enhancement: {str(e)}")
+
 @api_router.get("/books", response_model=List[Book])
 async def get_books(
     search: Optional[str] = Query(None, description="Search in title, author, or ISBN"),
     genre: Optional[str] = Query(None, description="Filter by genre"),
     shelf: Optional[str] = Query(None, description="Filter by shelf"),
     author: Optional[str] = Query(None, description="Filter by author"),
+    search_status: Optional[str] = Query(None, description="Filter by search status"),
     limit: int = Query(100, le=500, description="Maximum number of books to return"),
     skip: int = Query(0, ge=0, description="Number of books to skip")
 ):
@@ -260,6 +742,9 @@ async def get_books(
     if author:
         filter_query["author"] = {"$regex": author, "$options": "i"}
     
+    if search_status:
+        filter_query["search_status"] = search_status
+    
     # Query database
     cursor = db.books.find(filter_query).skip(skip).limit(limit).sort("title", 1)
     books = await cursor.to_list(length=limit)
@@ -281,13 +766,25 @@ async def get_book_stats():
     # Get unique authors
     authors = await db.books.distinct("author")
     
+    # Get search status counts
+    pending_count = await db.books.count_documents({"search_status": "pending"})
+    found_count = await db.books.count_documents({"search_status": "found"})
+    not_found_count = await db.books.count_documents({"search_status": "not_found"})
+    searching_count = await db.books.count_documents({"search_status": "searching"})
+    
     return {
         "total_books": total_books,
         "total_genres": len(genres),
         "total_shelves": len(shelves),
         "total_authors": len(authors),
         "genres": sorted(genres),
-        "shelves": sorted(shelves)
+        "shelves": sorted(shelves),
+        "search_status": {
+            "pending": pending_count,
+            "found": found_count,
+            "not_found": not_found_count,
+            "searching": searching_count
+        }
     }
 
 @api_router.post("/books", response_model=Book)
@@ -299,7 +796,9 @@ async def create_book(book_data: BookCreate):
     if is_duplicate:
         raise HTTPException(status_code=400, detail="Duplicate book found")
     
-    book = Book(**book_data.dict())
+    book_dict = book_data.dict()
+    book_dict['search_status'] = 'pending'
+    book = Book(**book_dict)
     await db.books.insert_one(book.dict())
     
     return book
@@ -340,7 +839,8 @@ async def export_books_to_excel(
     search: Optional[str] = Query(None),
     genre: Optional[str] = Query(None),
     shelf: Optional[str] = Query(None),
-    author: Optional[str] = Query(None)
+    author: Optional[str] = Query(None),
+    search_status: Optional[str] = Query(None)
 ):
     """Export books to Excel file"""
     
@@ -364,6 +864,9 @@ async def export_books_to_excel(
     if author:
         filter_query["author"] = {"$regex": author, "$options": "i"}
     
+    if search_status:
+        filter_query["search_status"] = search_status
+    
     # Get all matching books
     books = await db.books.find(filter_query).sort("title", 1).to_list(None)
     
@@ -383,6 +886,14 @@ async def export_books_to_excel(
             'Barcode': book.get('barcode', ''),
             'Shelf': book.get('shelf', ''),
             'Genre': book.get('genre', ''),
+            'AR Level': book.get('ar_level', ''),
+            'Lexile': book.get('lexile', ''),
+            'Search Status': book.get('search_status', ''),
+            'Description': book.get('description', ''),
+            'Description RU': book.get('description_ru', ''),
+            'Image URL': book.get('image_url', ''),
+            'Page Count': book.get('page_count', ''),
+            'Categories': ', '.join(book.get('categories', [])),
             'Created At': book.get('created_at', '').strftime('%Y-%m-%d %H:%M:%S') if book.get('created_at') else '',
         })
     
@@ -418,7 +929,7 @@ async def export_books_to_excel(
     
     # Create filename with timestamp
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"library_books_{timestamp}.xlsx"
+    filename = f"library_books_enhanced_{timestamp}.xlsx"
     
     # Return the Excel file
     return StreamingResponse(

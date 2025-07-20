@@ -13,9 +13,14 @@ function App() {
   const [selectedGenre, setSelectedGenre] = useState("");
   const [selectedShelf, setSelectedShelf] = useState("");
   const [selectedAuthor, setSelectedAuthor] = useState("");
+  const [selectedSearchStatus, setSelectedSearchStatus] = useState("");
   const [uploadStatus, setUploadStatus] = useState(null);
   const [isDragOver, setIsDragOver] = useState(false);
   const [currentView, setCurrentView] = useState("upload"); // upload, catalog
+  const [currentBook, setCurrentBook] = useState(null);
+  const [isViewerOpen, setIsViewerOpen] = useState(false);
+  const [enhancementStatus, setEnhancementStatus] = useState(null);
+  const [batchProgress, setBatchProgress] = useState(null);
 
   // Fetch books with filters
   const fetchBooks = useCallback(async () => {
@@ -27,6 +32,7 @@ function App() {
       if (selectedGenre) params.append('genre', selectedGenre);
       if (selectedShelf) params.append('shelf', selectedShelf);
       if (selectedAuthor) params.append('author', selectedAuthor);
+      if (selectedSearchStatus) params.append('search_status', selectedSearchStatus);
       
       const response = await axios.get(`${API}/books?${params.toString()}`);
       setBooks(response.data);
@@ -36,7 +42,7 @@ function App() {
     } finally {
       setLoading(false);
     }
-  }, [searchTerm, selectedGenre, selectedShelf, selectedAuthor]);
+  }, [searchTerm, selectedGenre, selectedShelf, selectedAuthor, selectedSearchStatus]);
 
   // Fetch stats
   const fetchStats = async () => {
@@ -127,6 +133,74 @@ function App() {
     }
   };
 
+  // Book enhancement functions
+  const enhanceSingleBook = async (bookId) => {
+    try {
+      setEnhancementStatus({ type: 'loading', message: 'Searching Google Books...' });
+      
+      const response = await axios.post(`${API}/books/${bookId}/enhance`);
+      
+      if (response.data.success) {
+        setEnhancementStatus({
+          type: 'success',
+          message: `Book enhanced successfully! Updated: ${response.data.enhanced_fields.join(', ')}`
+        });
+        fetchBooks();
+        fetchStats();
+      } else {
+        setEnhancementStatus({
+          type: 'warning',
+          message: response.data.message
+        });
+      }
+      
+      setTimeout(() => setEnhancementStatus(null), 5000);
+      
+    } catch (error) {
+      console.error("Enhancement error:", error);
+      setEnhancementStatus({
+        type: 'error',
+        message: error.response?.data?.detail || "Enhancement failed"
+      });
+      setTimeout(() => setEnhancementStatus(null), 5000);
+    }
+  };
+
+  const enhanceAllPendingBooks = async () => {
+    try {
+      const pendingBooks = books.filter(book => book.search_status === 'pending');
+      if (pendingBooks.length === 0) {
+        alert('No pending books to enhance');
+        return;
+      }
+
+      const confirm = window.confirm(
+        `Enhance ${pendingBooks.length} pending books? This may take several minutes.`
+      );
+      
+      if (!confirm) return;
+
+      setBatchProgress({ current: 0, total: pendingBooks.length });
+      
+      const response = await axios.post(`${API}/books/enhance-batch`, {
+        enhance_all_pending: true
+      });
+
+      setBatchProgress(null);
+      
+      if (response.data.success) {
+        alert(`Batch enhancement completed! Enhanced ${response.data.enhanced_count} of ${response.data.total_processed} books.`);
+        fetchBooks();
+        fetchStats();
+      }
+      
+    } catch (error) {
+      setBatchProgress(null);
+      console.error("Batch enhancement error:", error);
+      alert(error.response?.data?.detail || "Batch enhancement failed");
+    }
+  };
+
   // Export functionality
   const handleExport = async () => {
     try {
@@ -137,6 +211,7 @@ function App() {
       if (selectedGenre) params.append('genre', selectedGenre);
       if (selectedShelf) params.append('shelf', selectedShelf);
       if (selectedAuthor) params.append('author', selectedAuthor);
+      if (selectedSearchStatus) params.append('search_status', selectedSearchStatus);
       
       const response = await axios.get(`${API}/books/export?${params.toString()}`, {
         responseType: 'blob',
@@ -149,7 +224,7 @@ function App() {
       
       // Extract filename from headers or use default
       const contentDisposition = response.headers['content-disposition'];
-      let filename = 'library_books.xlsx';
+      let filename = 'library_books_enhanced.xlsx';
       if (contentDisposition) {
         const matches = contentDisposition.match(/filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/);
         if (matches && matches[1]) {
@@ -176,6 +251,60 @@ function App() {
     setSelectedGenre("");
     setSelectedShelf("");
     setSelectedAuthor("");
+    setSelectedSearchStatus("");
+  };
+
+  const openBookViewer = (book) => {
+    setCurrentBook(book);
+    setIsViewerOpen(true);
+  };
+
+  const closeBookViewer = () => {
+    setCurrentBook(null);
+    setIsViewerOpen(false);
+  };
+
+  const getStatusBadgeClass = (status) => {
+    switch (status) {
+      case 'found':
+        return 'bg-green-100 text-green-800';
+      case 'not_found':
+        return 'bg-red-100 text-red-800';
+      case 'searching':
+        return 'bg-yellow-100 text-yellow-800';
+      case 'pending':
+      default:
+        return 'bg-gray-100 text-gray-800';
+    }
+  };
+
+  const getStatusText = (status) => {
+    switch (status) {
+      case 'found':
+        return 'Found';
+      case 'not_found':
+        return 'Not Found';
+      case 'searching':
+        return 'Searching...';
+      case 'pending':
+      default:
+        return 'Pending';
+    }
+  };
+
+  const getGenreText = (genre) => {
+    const genreMap = {
+      'fic': 'Fiction',
+      'nf': 'Non-Fiction',
+      'bio': 'Biography',
+      'sci': 'Science',
+      'his': 'History',
+      'mys': 'Mystery',
+      'rom': 'Romance',
+      'fan': 'Fantasy',
+      'adv': 'Adventure'
+    };
+    return genreMap[genre] || genre || '—';
   };
 
   return (
@@ -190,7 +319,7 @@ function App() {
                   <svg className="w-8 h-8 text-blue-600 mr-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.746 0 3.332.477 4.5 1.253v13C19.832 18.477 18.246 18 16.5 18c-1.746 0-3.332.477-4.5 1.253z" />
                   </svg>
-                  Library Management System
+                  📚 Library Management System
                 </h1>
               </div>
             </div>
@@ -205,7 +334,7 @@ function App() {
                     : 'text-gray-500 hover:text-gray-700 hover:bg-gray-100'
                 }`}
               >
-                Upload Books
+                📁 Upload Books
               </button>
               <button
                 onClick={() => setCurrentView('catalog')}
@@ -215,7 +344,7 @@ function App() {
                     : 'text-gray-500 hover:text-gray-700 hover:bg-gray-100'
                 }`}
               >
-                Book Catalog
+                📖 Book Catalog
               </button>
             </nav>
           </div>
@@ -225,7 +354,7 @@ function App() {
       {/* Stats Bar */}
       <div className="bg-white border-b border-gray-200">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4">
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <div className="grid grid-cols-2 md:grid-cols-6 gap-4">
             <div className="text-center">
               <div className="text-2xl font-bold text-blue-600">{stats.total_books || 0}</div>
               <div className="text-sm text-gray-500">Total Books</div>
@@ -242,9 +371,52 @@ function App() {
               <div className="text-2xl font-bold text-orange-600">{stats.total_shelves || 0}</div>
               <div className="text-sm text-gray-500">Shelves</div>
             </div>
+            <div className="text-center">
+              <div className="text-2xl font-bold text-green-500">{stats.search_status?.found || 0}</div>
+              <div className="text-sm text-gray-500">🔍 Enhanced</div>
+            </div>
+            <div className="text-center">
+              <div className="text-2xl font-bold text-yellow-500">{stats.search_status?.pending || 0}</div>
+              <div className="text-sm text-gray-500">⏳ Pending</div>
+            </div>
           </div>
         </div>
       </div>
+
+      {/* Enhancement Status */}
+      {enhancementStatus && (
+        <div className={`mx-auto max-w-7xl px-4 py-2`}>
+          <div className={`p-3 rounded-lg flex items-center ${
+            enhancementStatus.type === 'success' ? 'bg-green-100 text-green-800' :
+            enhancementStatus.type === 'error' ? 'bg-red-100 text-red-800' :
+            enhancementStatus.type === 'warning' ? 'bg-yellow-100 text-yellow-800' :
+            'bg-blue-100 text-blue-800'
+          }`}>
+            {enhancementStatus.type === 'loading' && (
+              <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-current mr-2"></div>
+            )}
+            <span>{enhancementStatus.message}</span>
+          </div>
+        </div>
+      )}
+
+      {/* Batch Progress */}
+      {batchProgress && (
+        <div className="mx-auto max-w-7xl px-4 py-2">
+          <div className="bg-blue-100 p-4 rounded-lg">
+            <div className="flex justify-between items-center mb-2">
+              <span className="text-blue-800">Enhancing books...</span>
+              <span className="text-blue-800">{batchProgress.current}/{batchProgress.total}</span>
+            </div>
+            <div className="w-full bg-blue-200 rounded-full h-2">
+              <div 
+                className="bg-blue-600 h-2 rounded-full transition-all duration-300"
+                style={{width: `${(batchProgress.current / batchProgress.total) * 100}%`}}
+              ></div>
+            </div>
+          </div>
+        </div>
+      )}
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         
@@ -254,9 +426,12 @@ function App() {
             {/* Upload Section */}
             <div className="bg-white rounded-xl shadow-lg p-8">
               <div className="text-center mb-8">
-                <h2 className="text-3xl font-bold text-gray-900 mb-4">Upload Your Library Catalog</h2>
+                <h2 className="text-3xl font-bold text-gray-900 mb-4">📚 Upload Your Library Catalog</h2>
                 <p className="text-lg text-gray-600 max-w-2xl mx-auto">
                   Upload your Excel file containing book data. We support .xlsx and .xls formats with columns for Title, Author, ISBN, Barcode, Shelf, and Genre.
+                </p>
+                <p className="text-sm text-blue-600 mt-2">
+                  🔍 <strong>NEW:</strong> Books will be automatically enhanced with information from Google Books API!
                 </p>
               </div>
 
@@ -318,6 +493,8 @@ function App() {
                       {uploadStatus.books_processed > 0 && (
                         <p className="text-sm mt-1">
                           Successfully imported {uploadStatus.books_processed} books.
+                          <br />
+                          📍 Books are ready for Google Books enhancement in the catalog view.
                         </p>
                       )}
                       {uploadStatus.duplicates_found > 0 && (
@@ -345,11 +522,14 @@ function App() {
 
               {/* Required Format Info */}
               <div className="mt-8 bg-blue-50 rounded-lg p-6">
-                <h3 className="text-lg font-medium text-blue-900 mb-3">Required Excel Format</h3>
+                <h3 className="text-lg font-medium text-blue-900 mb-3">📋 Required Excel Format</h3>
                 <div className="text-blue-800 space-y-2">
                   <p><span className="font-medium">Required columns:</span> Title, Author</p>
                   <p><span className="font-medium">Optional columns:</span> ISBN, Barcode, Shelf, Genre</p>
                   <p className="text-sm text-blue-600">Column names are case-insensitive. The system will automatically detect and validate your file structure.</p>
+                  <p className="text-sm text-green-600 mt-3">
+                    🚀 <strong>Auto-Enhancement:</strong> After upload, use the "🔍 Enhance All Pending" button to automatically fill in missing information like authors, ISBNs, descriptions, and genres from Google Books!
+                  </p>
                 </div>
               </div>
             </div>
@@ -359,11 +539,38 @@ function App() {
         {/* Catalog View */}
         {currentView === 'catalog' && (
           <div className="space-y-6">
+            {/* Enhancement Controls */}
+            <div className="bg-gradient-to-r from-blue-50 to-indigo-50 rounded-xl p-6 border border-blue-200">
+              <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-4">
+                <div>
+                  <h3 className="text-lg font-semibold text-blue-900 mb-2">🔍 Google Books Enhancement</h3>
+                  <p className="text-blue-700 text-sm">
+                    Automatically find authors, ISBNs, descriptions, cover images, and genres for your books.
+                    <br />
+                    <strong>Pending books:</strong> {stats.search_status?.pending || 0} • <strong>Enhanced:</strong> {stats.search_status?.found || 0}
+                  </p>
+                </div>
+                <div className="flex gap-3">
+                  <button
+                    onClick={enhanceAllPendingBooks}
+                    disabled={loading || (stats.search_status?.pending || 0) === 0}
+                    className="px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-2 font-medium"
+                  >
+                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                    </svg>
+                    🔍 Enhance All Pending ({stats.search_status?.pending || 0})
+                  </button>
+                </div>
+              </div>
+            </div>
+
             {/* Search and Filter Section */}
             <div className="bg-white rounded-xl shadow-lg p-6">
-              <div className="flex flex-col lg:flex-row gap-4 items-center">
+              <div className="grid grid-cols-1 lg:grid-cols-6 gap-4 items-end">
                 {/* Search */}
-                <div className="flex-1 w-full lg:w-auto">
+                <div className="lg:col-span-2">
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Search</label>
                   <div className="relative">
                     <svg className="absolute left-3 top-1/2 transform -translate-y-1/2 w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
@@ -379,29 +586,50 @@ function App() {
                 </div>
 
                 {/* Filters */}
-                <div className="flex gap-3 w-full lg:w-auto">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Genre</label>
                   <select
-                    className="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                     value={selectedGenre}
                     onChange={(e) => setSelectedGenre(e.target.value)}
                   >
                     <option value="">All Genres</option>
                     {stats.genres?.map((genre) => (
-                      <option key={genre} value={genre}>{genre}</option>
+                      <option key={genre} value={genre}>{getGenreText(genre)}</option>
                     ))}
                   </select>
+                </div>
 
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Shelf</label>
                   <select
-                    className="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                     value={selectedShelf}
                     onChange={(e) => setSelectedShelf(e.target.value)}
                   >
                     <option value="">All Shelves</option>
                     {stats.shelves?.map((shelf) => (
-                      <option key={shelf} value={shelf}>{shelf}</option>
+                      <option key={shelf} value={shelf}>Shelf {shelf}</option>
                     ))}
                   </select>
+                </div>
 
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Status</label>
+                  <select
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                    value={selectedSearchStatus}
+                    onChange={(e) => setSelectedSearchStatus(e.target.value)}
+                  >
+                    <option value="">All Status</option>
+                    <option value="pending">⏳ Pending</option>
+                    <option value="found">✅ Found</option>
+                    <option value="not_found">❌ Not Found</option>
+                    <option value="searching">🔍 Searching</option>
+                  </select>
+                </div>
+
+                <div className="flex gap-2">
                   <button
                     onClick={clearFilters}
                     className="px-4 py-2 text-gray-600 hover:text-gray-800 hover:bg-gray-100 rounded-lg transition-colors"
@@ -417,7 +645,7 @@ function App() {
                     <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                     </svg>
-                    Export Excel
+                    Export
                   </button>
                 </div>
               </div>
@@ -451,31 +679,64 @@ function App() {
                         <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Title</th>
                         <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Author</th>
                         <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">ISBN</th>
-                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Barcode</th>
-                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Shelf</th>
                         <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Genre</th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Shelf</th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+                        <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
                       </tr>
                     </thead>
                     <tbody className="bg-white divide-y divide-gray-200">
                       {books.map((book) => (
                         <tr key={book.id} className="hover:bg-gray-50 transition-colors">
-                          <td className="px-6 py-4 whitespace-nowrap">
-                            <div className="text-sm font-medium text-gray-900">{book.title}</div>
+                          <td className="px-6 py-4">
+                            <div 
+                              className="text-sm font-medium text-blue-600 hover:text-blue-800 cursor-pointer"
+                              onClick={() => openBookViewer(book)}
+                            >
+                              {book.title}
+                            </div>
+                            {book.barcode && (
+                              <div className="text-xs text-gray-500">{book.barcode}</div>
+                            )}
                           </td>
                           <td className="px-6 py-4 whitespace-nowrap">
-                            <div className="text-sm text-gray-900">{book.author}</div>
+                            <div className="text-sm text-gray-900">{book.author || '—'}</div>
                           </td>
                           <td className="px-6 py-4 whitespace-nowrap">
-                            <div className="text-sm text-gray-900">{book.isbn || '-'}</div>
+                            <div className="text-sm text-gray-900">{book.isbn || '—'}</div>
                           </td>
                           <td className="px-6 py-4 whitespace-nowrap">
-                            <div className="text-sm text-gray-900">{book.barcode || '-'}</div>
+                            <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
+                              book.genre ? 'bg-purple-100 text-purple-800' : 'bg-gray-100 text-gray-800'
+                            }`}>
+                              {getGenreText(book.genre)}
+                            </span>
                           </td>
                           <td className="px-6 py-4 whitespace-nowrap">
-                            <div className="text-sm text-gray-900">{book.shelf || '-'}</div>
+                            <div className="text-sm text-gray-900">{book.shelf || '—'}</div>
                           </td>
                           <td className="px-6 py-4 whitespace-nowrap">
-                            <div className="text-sm text-gray-900">{book.genre || '-'}</div>
+                            <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${getStatusBadgeClass(book.search_status)}`}>
+                              {getStatusText(book.search_status)}
+                            </span>
+                          </td>
+                          <td className="px-6 py-4 whitespace-nowrap text-sm font-medium space-x-2">
+                            <button
+                              onClick={() => openBookViewer(book)}
+                              className="text-blue-600 hover:text-blue-900 transition-colors"
+                              title="View Details"
+                            >
+                              👁️ View
+                            </button>
+                            {book.search_status === 'pending' && (
+                              <button
+                                onClick={() => enhanceSingleBook(book.id)}
+                                className="text-green-600 hover:text-green-900 transition-colors"
+                                title="Enhance with Google Books"
+                              >
+                                🔍 Enhance
+                              </button>
+                            )}
                           </td>
                         </tr>
                       ))}
@@ -493,6 +754,126 @@ function App() {
           </div>
         )}
       </main>
+
+      {/* Book Viewer Modal */}
+      {isViewerOpen && currentBook && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-xl max-w-4xl w-full max-h-[90vh] overflow-auto">
+            <div className="p-6">
+              <div className="flex justify-between items-start mb-6">
+                <div>
+                  <h2 className="text-2xl font-bold text-gray-900 mb-2">{currentBook.title}</h2>
+                  <p className="text-gray-600">{currentBook.author}</p>
+                  <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full mt-2 ${getStatusBadgeClass(currentBook.search_status)}`}>
+                    {getStatusText(currentBook.search_status)}
+                  </span>
+                </div>
+                <button
+                  onClick={closeBookViewer}
+                  className="text-gray-400 hover:text-gray-600 text-2xl"
+                >
+                  ✕
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                {/* Book Cover */}
+                <div className="text-center">
+                  {currentBook.image_url ? (
+                    <img
+                      src={currentBook.image_url}
+                      alt={`Cover of ${currentBook.title}`}
+                      className="w-full max-w-64 h-auto rounded-lg shadow-md mx-auto"
+                      onError={(e) => {
+                        e.target.style.display = 'none';
+                        e.target.nextSibling.style.display = 'flex';
+                      }}
+                    />
+                  ) : (
+                    <div className="w-full max-w-64 h-80 bg-gray-200 rounded-lg shadow-md mx-auto flex items-center justify-center">
+                      <span className="text-gray-500">No Cover</span>
+                    </div>
+                  )}
+                  <div className="mt-4 text-sm text-gray-600">
+                    {currentBook.page_count && <p>Pages: {currentBook.page_count}</p>}
+                    {currentBook.categories && currentBook.categories.length > 0 && (
+                      <p>Categories: {currentBook.categories.slice(0, 3).join(', ')}</p>
+                    )}
+                  </div>
+                </div>
+
+                {/* Book Details */}
+                <div className="lg:col-span-2 space-y-6">
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700">ISBN</label>
+                      <p className="mt-1 text-sm text-gray-900">{currentBook.isbn || '—'}</p>
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700">Barcode</label>
+                      <p className="mt-1 text-sm text-gray-900">{currentBook.barcode || '—'}</p>
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700">Genre</label>
+                      <p className="mt-1 text-sm text-gray-900">{getGenreText(currentBook.genre)}</p>
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700">Shelf</label>
+                      <p className="mt-1 text-sm text-gray-900">{currentBook.shelf || '—'}</p>
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700">AR Level</label>
+                      <p className="mt-1 text-sm text-gray-900">{currentBook.ar_level || '—'}</p>
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700">Lexile</label>
+                      <p className="mt-1 text-sm text-gray-900">{currentBook.lexile || '—'}</p>
+                    </div>
+                  </div>
+
+                  {/* Description */}
+                  {currentBook.description && (
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">Description</label>
+                      <div className="bg-gray-50 rounded-lg p-4 max-h-40 overflow-y-auto">
+                        <p className="text-sm text-gray-700 leading-relaxed">{currentBook.description}</p>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Russian Description */}
+                  {currentBook.description_ru && (
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-2">Описание (русский)</label>
+                      <div className="bg-gray-50 rounded-lg p-4 max-h-40 overflow-y-auto">
+                        <p className="text-sm text-gray-700 leading-relaxed">{currentBook.description_ru}</p>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Enhancement Button */}
+                  {currentBook.search_status === 'pending' && (
+                    <div className="pt-4 border-t">
+                      <button
+                        onClick={() => {
+                          enhanceSingleBook(currentBook.id);
+                          closeBookViewer();
+                        }}
+                        className="w-full py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors flex items-center justify-center gap-2"
+                      >
+                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                        </svg>
+                        🔍 Enhance with Google Books
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
