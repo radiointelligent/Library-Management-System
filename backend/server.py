@@ -1025,7 +1025,7 @@ async def export_books_to_excel(
             'Description RU': book.get('description_ru', ''),
             'Image URL': book.get('image_url', ''),
             'Page Count': book.get('page_count', ''),
-            'Categories': ', '.join(book.get('categories', [])),
+            'Categories': ', '.join(book.get('categories', []) or []),
             'Created At': book.get('created_at', '').strftime('%Y-%m-%d %H:%M:%S') if book.get('created_at') else '',
         })
     
