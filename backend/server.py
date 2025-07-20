@@ -831,27 +831,29 @@ async def enhance_books_batch(request: BatchEnhancementRequest):
 
 @api_router.get("/books", response_model=List[Book])
 async def get_books(
-    search: Optional[str] = Query(None, description="Search in title, author, or ISBN"),
+    search: Optional[str] = Query(None, description="Search in title, author, ISBN, or barcode"),
     genre: Optional[str] = Query(None, description="Filter by genre"),
     shelf: Optional[str] = Query(None, description="Filter by shelf"),
     author: Optional[str] = Query(None, description="Filter by author"),
     search_status: Optional[str] = Query(None, description="Filter by search status"),
     barcode: Optional[str] = Query(None, description="Search by barcode"),
-    limit: int = Query(100, le=500, description="Maximum number of books to return"),
-    skip: int = Query(0, ge=0, description="Number of books to skip")
+    limit: int = Query(10000, le=50000, description="Maximum number of books to return"),
+    skip: int = Query(0, ge=0, description="Number of books to skip"),
+    show_all: bool = Query(False, description="Show all books without limit")
 ):
-    """Get books with optional filtering and search"""
+    """Get books with optional filtering and search - now supports up to 50,000 books"""
     
     # Build filter query
     filter_query = {}
     
     if search:
-        # Search in title, author, and ISBN
+        # Search in title, author, ISBN, and barcode
         search_regex = {"$regex": search, "$options": "i"}
         filter_query["$or"] = [
             {"title": search_regex},
             {"author": search_regex},
-            {"isbn": search_regex}
+            {"isbn": search_regex},
+            {"barcode": search_regex}
         ]
     
     if genre:
@@ -870,8 +872,14 @@ async def get_books(
         filter_query["barcode"] = {"$regex": barcode, "$options": "i"}
     
     # Query database
-    cursor = db.books.find(filter_query).skip(skip).limit(limit).sort("title", 1)
-    books = await cursor.to_list(length=limit)
+    if show_all:
+        # Return all matching books
+        cursor = db.books.find(filter_query).sort("title", 1)
+        books = await cursor.to_list(length=None)
+    else:
+        # Apply limit and skip
+        cursor = db.books.find(filter_query).skip(skip).limit(limit).sort("title", 1)
+        books = await cursor.to_list(length=limit)
     
     return [Book(**book) for book in books]
 
